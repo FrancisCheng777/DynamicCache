@@ -1,0 +1,6 @@
+# Install into an existing working LIBERO environment (Python >= 3.10).
+# Deliberately no torch/diffusers dependency: retain the simulator's compatible torch.
+numpy>=1.22,<2
+websockets==15.0.1
+msgpack>=1,<2
+imageio[ffmpeg]>=2.31,<3

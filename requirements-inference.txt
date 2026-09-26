@@ -1,0 +1,14 @@
+# Install torch==2.9.0 from the desired CUDA wheel index first.
+torch==2.9.0
+diffusers==0.36.0
+transformers==4.55.2
+numpy==1.26.4
+accelerate>=1,<2
+einops>=0.8,<0.9
+easydict==1.13
+websockets==15.0.1
+msgpack>=1,<2
+imageio[ffmpeg]>=2.37,<3
+ftfy>=6.3,<7
+safetensors>=0.4
+Pillow>=10

@@ -1,4 +1,5 @@
 # Copyright 2024-2025 The Robbyant Team Authors. All rights reserved.
+# Modified by DynamicCache contributors: optional whole-stack action residual caching.
 import math
 from copy import deepcopy
 
@@ -28,8 +29,11 @@ from functools import partial
 
 try:
     from flash_attn_interface import flash_attn_func
-except:
-    from flash_attn import flash_attn_func
+except ImportError:
+    try:
+        from flash_attn import flash_attn_func
+    except ImportError:
+        flash_attn_func = None
 
 __all__ = ['WanTransformer3DModel']
 
@@ -302,6 +306,8 @@ class WanAttention(torch.nn.Module):
         if attn_mode == 'torch':
             self.attn_op = custom_sdpa
         elif attn_mode == 'flashattn':
+            if flash_attn_func is None:
+                raise ImportError("attn_mode='flashattn' requires flash-attn; install it or explicitly use 'torch'")
             self.attn_op = flash_attn_func
         elif attn_mode == 'flex':
             self.attn_op = FlexAttnFunc(cross_attention_dim_head is not None)
@@ -804,6 +810,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
         cache_name="pos",
         action_mode=False,
         train_mode=False,
+        action_cache=None,
+        cache_step=None,
     ):
         r"""
         Forward pass through the diffusion model
@@ -857,13 +865,23 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
             latent_time_steps, dtype=latent_hidden_states.dtype)
         timestep_proj = timestep_proj.unflatten(2, (6, -1))  # B L 6 C
 
-        for block in self.blocks:
-            latent_hidden_states = block(latent_hidden_states,
-                                         text_hidden_states,
-                                         timestep_proj,
-                                         rotary_emb,
-                                         update_cache=update_cache,
-                                         cache_name=cache_name)
+        def compute_blocks(hidden_states):
+            for block in self.blocks:
+                hidden_states = block(hidden_states,
+                                      text_hidden_states,
+                                      timestep_proj,
+                                      rotary_emb,
+                                      update_cache=update_cache,
+                                      cache_name=cache_name)
+            return hidden_states
+
+        if action_cache is not None and action_mode and not self.training:
+            latent_hidden_states = action_cache.run(
+                latent_hidden_states, compute_blocks,
+                step=cache_step, update_cache=update_cache,
+            )
+        else:
+            latent_hidden_states = compute_blocks(latent_hidden_states)
         temb_scale_shift_table = self.scale_shift_table[None] + temb[:, :, None, ...]
         shift, scale = rearrange(temb_scale_shift_table,
                                  'b l n c -> b n l c').chunk(2, dim=1)

@@ -1,8 +1,10 @@
 # Copyright 2024-2025 The Robbyant Team Authors. All rights reserved.
+# Modified by DynamicCache contributors: optional C³ache, seeded evaluation and profiling.
 import argparse
 import os
 import sys
 import time
+import random
 from functools import partial
 from PIL import Image
 from diffusers.video_processor import VideoProcessor
@@ -18,6 +20,8 @@ from tqdm import tqdm
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from configs import VA_CONFIGS
+from c3ache_runtime import build_metadata
+from modules.c3ache import C3ache, C3acheConfig
 from distributed.fsdp import shard_model
 from distributed.util import _configure_model, init_distributed
 from modules.utils import (
@@ -47,6 +51,10 @@ class VA_Server:
         self.dtype = job_config.param_dtype
         self.device = torch.device(f"cuda:{job_config.local_rank}")
         self.enable_offload = getattr(job_config, 'enable_offload', True)  # offload vae & text_encoder to save vram
+        self.action_cache = C3ache(getattr(job_config, 'c3ache', C3acheConfig()))
+        self.profile_inference = getattr(job_config, 'profile_inference', False)
+        self.last_infer_timings = {}
+        self.metadata = build_metadata(job_config, self.action_cache.config, device=self.device)
 
         self.scheduler = FlowMatchScheduler(shift=self.job_config.snr_shift,
                                             sigma_min=0.0,
@@ -376,6 +384,7 @@ class VA_Server:
 
     def _reset(self, prompt=None):
         logger.info('Reset.')
+        self.action_cache.reset()
         self.use_cfg = (self.job_config.guidance_scale > 1) or (self.job_config.action_guidance_scale > 1)
         #### Reset all parameters
         self.frame_st_id = 0
@@ -440,7 +449,14 @@ class VA_Server:
         os.makedirs(self.exp_save_root, exist_ok=True)
         torch.cuda.empty_cache()
 
+    def _profile_clock(self):
+        if self.profile_inference:
+            torch.cuda.synchronize(self.device)
+            return time.perf_counter()
+        return None
+
     def _infer(self, obs, frame_st_id=0):
+        infer_start = self._profile_clock()
         frame_chunk_size = self.job_config.frame_chunk_size
         if frame_st_id == 0:
             init_latent = self._encode_obs(obs)
@@ -467,6 +483,15 @@ class VA_Server:
 
         self.scheduler.set_timesteps(video_inference_step)
         self.action_scheduler.set_timesteps(action_inference_step)
+        self.action_cache.begin_chunk(
+            frame_st_id,
+            tuple(zip(self.action_scheduler.timesteps.tolist(), self.action_scheduler.sigmas.tolist())),
+            context=(self.cache_name, self.job_config.wan22_pretrained_model_name_or_path,
+                     self.job_config.guidance_scale, self.job_config.action_guidance_scale,
+                     "positive_then_negative" if self.use_cfg else "positive_only",
+                     self.job_config.action_dim, frame_chunk_size, self.action_per_frame,
+                     str(self.dtype), str(self.device)),
+        )
         timesteps = self.scheduler.timesteps
         action_timesteps = self.action_scheduler.timesteps
 
@@ -482,6 +507,7 @@ class VA_Server:
             mode='constant',
             value=0)
 
+        video_start = self._profile_clock()
         with (
                 torch.no_grad(),
         ):
@@ -521,6 +547,7 @@ class VA_Server:
 
                 latents[:, :, 0:1] = latent_cond if frame_st_id == 0 else latents[:, :, 0:1]
 
+            action_start = self._profile_clock()
             for i, t in enumerate(tqdm(action_timesteps)):
                 last_step = i == len(action_timesteps) - 1
                 action_cond = torch.zeros(
@@ -543,7 +570,9 @@ class VA_Server:
                     self._repeat_input_for_cfg(input_dict['action_res_lst']),
                     update_cache=1 if last_step else 0,
                     cache_name=self.cache_name,
-                    action_mode=True)
+                    action_mode=True,
+                    action_cache=self.action_cache,
+                    cache_step=None if last_step else i)
 
                 if not last_step:
                     action_noise_pred = rearrange(action_noise_pred,
@@ -560,19 +589,30 @@ class VA_Server:
 
                 actions[:, :, 0:1] = action_cond if frame_st_id == 0 else actions[:, :, 0:1]
 
+        action_end = self._profile_clock()
         actions[:, ~self.action_mask] *= 0
 
-        save_async(latents, os.path.join(self.exp_save_root, f'latents_{frame_st_id}.pt'))
-        save_async(actions, os.path.join(self.exp_save_root, f'actions_{frame_st_id}.pt'))
+        if getattr(self.job_config, 'save_debug', True):
+            save_async(latents, os.path.join(self.exp_save_root, f'latents_{frame_st_id}.pt'))
+            save_async(actions, os.path.join(self.exp_save_root, f'actions_{frame_st_id}.pt'))
 
         actions = self.postprocess_action(actions)
         torch.cuda.empty_cache()
+        infer_end = self._profile_clock()
+        if self.profile_inference:
+            self.last_infer_timings = {
+                'prepare_ms': (video_start - infer_start) * 1000,
+                'video_loop_ms': (action_start - video_start) * 1000,
+                'action_loop_ms': (action_end - action_start) * 1000,
+                'infer_ms': (infer_end - infer_start) * 1000,
+            }
         return actions, latents
 
     def _compute_kv_cache(self, obs):
         ### optional async save obs for debug
         self.transformer.clear_pred_cache(self.cache_name)
-        save_async(obs['obs'], os.path.join(self.exp_save_root, f'obs_data_{self.frame_st_id}.pt'))
+        if getattr(self.job_config, 'save_debug', True):
+            save_async(obs['obs'], os.path.join(self.exp_save_root, f'obs_data_{self.frame_st_id}.pt'))
         latent_model_input = self._encode_obs(obs)
         if self.frame_st_id == 0:
             latent_model_input = torch.cat(
@@ -605,23 +645,36 @@ class VA_Server:
 
     @torch.no_grad()
     def infer(self, obs):
+        if obs.get('get_metadata', False):
+            return dict(metadata=self.metadata)
         reset = obs.get('reset', False)
         prompt = obs.get('prompt', None)
         compute_kv_cache = obs.get('compute_kv_cache', False)
 
         if reset:
             logger.info(f"******************* Reset server ******************")
+            seed = obs.get('seed')
+            if seed is not None:
+                seed = int(seed)
+                if not 0 <= seed < 2**32:
+                    raise ValueError('seed must be in [0, 2**32)')
+                random.seed(seed)
+                np.random.seed(seed)
+                torch.manual_seed(seed)
             self._reset(prompt=prompt)
-            return dict()
+            return dict(metadata=self.metadata, seed=seed)
         elif compute_kv_cache:
             logger.info(
                 f"################# Compute KV Cache #################")
+            history_start = self._profile_clock()
             self._compute_kv_cache(obs)
-            return dict()
+            history_end = self._profile_clock()
+            timings = {'history_ms': (history_end - history_start) * 1000} if self.profile_inference else {}
+            return dict(timings_ms=timings)
         else:
             logger.info(f"################# Infer One Chunk #################")
             action, _ = self._infer(obs, frame_st_id=self.frame_st_id)
-            return dict(action=action)
+            return dict(action=action, c3ache=self.action_cache.stats(), timings_ms=self.last_infer_timings)
     
     def decode_one_video(self, latents, output_type):
         latents = latents.to(self.vae.dtype)
@@ -680,6 +733,15 @@ def run(args):
     port = config.port if args.port is None else args.port
     if args.save_root is not None:
         config.save_root = args.save_root
+    if args.checkpoint is not None:
+        config.wan22_pretrained_model_name_or_path = args.checkpoint
+    config.c3ache = C3acheConfig(args.c3ache, args.cache_start_step, args.cache_end_step, args.cache_refresh_interval)
+    if config.c3ache.enabled and config.c3ache.end_step >= config.action_num_inference_steps:
+        raise ValueError('Cache end step must be smaller than the native action step count')
+    config.profile_inference = args.profile_inference
+    if args.offload is not None:
+        config.enable_offload = args.offload
+    config.save_debug = args.save_debug
     rank = int(os.getenv("RANK", 0))
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
@@ -721,6 +783,14 @@ def main():
         default=None,
         help='save root'
     )
+    parser.add_argument('--checkpoint', help='Local released checkpoint directory; overrides the config path')
+    parser.add_argument('--c3ache', action='store_true', help='Enable training-free action residual reuse')
+    parser.add_argument('--cache-start-step', type=int, default=5, help='First cached sampler step, zero-based (inclusive)')
+    parser.add_argument('--cache-end-step', type=int, default=39, help='Last cached sampler step, zero-based (inclusive)')
+    parser.add_argument('--cache-refresh-interval', type=int, default=2, help='Regular chunks per refresh; 0=no periodic refresh, 1=all full')
+    parser.add_argument('--profile-inference', action='store_true', help='Synchronize CUDA at timing boundaries in BOTH baseline and cache runs')
+    parser.add_argument('--offload', action=argparse.BooleanOptionalAction, default=None, help='Override VAE/text CPU offload; unset preserves the upstream config')
+    parser.add_argument('--save-debug', action=argparse.BooleanOptionalAction, default=True, help='Save upstream latent/action/observation debug tensors')
     args = parser.parse_args()
     run(args)
     logger.info("Finish all process!!!!!!!!!!!!")

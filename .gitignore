@@ -1,1 +1,14 @@
 *.pyc
+__pycache__/
+.pytest_cache/
+.venv/
+.DS_Store
+.env
+/outputs/
+/visualization/
+/checkpoints/
+/train_out/
+*.safetensors
+*.pt
+*.ckpt
+*.log
