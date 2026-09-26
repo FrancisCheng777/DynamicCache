@@ -153,6 +153,7 @@ def client_runtime(libero):
                   else Path(next(iter(libero.__path__))).resolve())
     return {"python": platform.python_version(), "packages": versions,
             "mujoco_gl": os.environ.get("MUJOCO_GL"),
+            "mujoco_egl_device_id": os.environ.get("MUJOCO_EGL_DEVICE_ID"),
             "libero_code": git_state(module_dir),
             "evaluator_code": git_state(Path(__file__).resolve().parents[2])}
 

@@ -48,6 +48,9 @@ python script/run_libero_pair.py \
 
 脚本会记录命令和服务器日志，评测结束或出错时关闭自己启动的服务器。
 `--dry-run` 不加载模型、不运行仿真。端口被占用或客户端环境检查失败时会提前退出。
+整数 `--gpu` 同时用于默认 EGL 设备选择；已有 `MUJOCO_EGL_DEVICE_ID` 环境变量
+会被保留。使用 GPU UUID 或驱动中的 EGL 编号与 CUDA 编号不一致时，显式设置
+`MUJOCO_EGL_DEVICE_ID`，环境 preflight 会检查能否渲染。该值也写入 manifest。
 
 ## 单独启动 / 自定义窗口
 

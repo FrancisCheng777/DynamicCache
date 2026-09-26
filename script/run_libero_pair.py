@@ -108,6 +108,8 @@ def main():
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = args.gpu
     env.setdefault("MUJOCO_GL", "egl")
+    if args.gpu.isdecimal():
+        env.setdefault("MUJOCO_EGL_DEVICE_ID", args.gpu)
     env["PYTHONUNBUFFERED"] = "1"
     # Fail before launching if either port is already owned by another process.
     for port in [args.port, args.master_port]:
