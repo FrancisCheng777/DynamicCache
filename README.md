@@ -1,7 +1,5 @@
 # DynamicCache
 
-将 **C³ache 的跨 inference chunk 残差复用**移植到 **LingBot-VA**，用于 training-free 的 LIBERO 对照实验。
-
 本项目从 [官方 LingBot-VA](https://github.com/Robbyant/lingbot-va/tree/7c6ffa9bfc4b83582cafc860fab4c82cc7deeeeb) 的 `7c6ffa9` 提交派生，保留上游代码、历史和 Apache-2.0 许可证。C³ache 方法归属[原论文作者](https://arxiv.org/abs/2606.08962)；这是独立移植实现，不是论文官方代码。
 
 **当前状态：实现和 CPU 测试完成；尚未获得真实 CUDA / LIBERO rollout 的速度和成功率结果。** “成功率下降不超过 1 个百分点”是验收目标，尚未被实验证明。无需为缓存方法训练或修改模型权重，但需要使用已完成 LIBERO 后训练的 checkpoint。
