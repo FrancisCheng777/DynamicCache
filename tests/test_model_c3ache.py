@@ -4,6 +4,7 @@ import copy
 import pytest
 
 from wan_va.modules.c3ache import C3ache, C3acheConfig
+from wan_va.modules.c3ache_diagnostics import C3acheDiagnostics
 from wan_va.modules.model import WanTransformer3DModel
 
 
@@ -130,3 +131,22 @@ def test_video_calls_never_read_or_overwrite_action_residuals():
     actual = model(inputs(8), action_mode=False, action_cache=cache, cache_step=1)
     assert torch.equal(actual, expected)
     assert cache.stats() == before
+
+
+@torch.no_grad()
+def test_diagnostics_preserve_full_outputs_rng_and_active_kv():
+    full = tiny_model()
+    observed = copy.deepcopy(full)
+    diagnostics = C3acheDiagnostics(C3acheConfig(True, 1, 2, 0))
+    for frame in [0, 4, 8, 12]:
+        diagnostics.begin_chunk(frame, SCHEDULE)
+        for step in range(3):
+            data = inputs(frame, step)
+            rng_before = torch.get_rng_state().clone()
+            expected = full(data, action_mode=True)
+            actual = observed(data, action_mode=True, action_cache=diagnostics, cache_step=step)
+            assert torch.equal(actual, expected)
+            assert torch.equal(torch.get_rng_state(), rng_before)
+            assert_active_kv_equal(full, observed)
+        for model in [full, observed]:
+            model(inputs(frame), action_mode=True, update_cache=1)

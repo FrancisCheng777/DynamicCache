@@ -1,10 +1,12 @@
 """Real server sampling loops with a tiny real model; VAE/checkpoint I/O is external."""
 from types import SimpleNamespace
+import copy
 
 import torch
 import pytest
 
 from wan_va.modules.c3ache import C3ache, C3acheConfig
+from wan_va.modules.c3ache_diagnostics import C3acheDiagnostics
 from wan_va.modules.model import WanTransformer3DModel
 from wan_va.utils.scheduler import FlowMatchScheduler
 from wan_va.wan_va_server import VA_Server
@@ -60,3 +62,26 @@ def test_server_distinguishes_sampler_steps_cold_chunk_video_and_zero_noise_comm
                  + [(True, 0, step) for step in range(action_steps)] + [(True, 1, None)])
     assert calls == one_chunk * 3
     assert instance.action_cache.stats()["full_reasons"]["kv_commit"] == 1
+
+
+@torch.no_grad()
+@pytest.mark.parametrize("action_steps,video_steps", [(3, 2), (50, 20)])
+def test_shadow_keeps_native_video_action_sampler_and_commit_outputs(action_steps, video_steps):
+    full = server(action_steps=action_steps, video_steps=video_steps)
+    full.action_cache = C3ache(C3acheConfig())
+    observed = copy.deepcopy(full)
+    observed.action_cache = C3acheDiagnostics(C3acheConfig(True, 1, action_steps - 1, 2))
+    for frame in [0, 2, 4, 6]:
+        torch.manual_seed(100 + frame)
+        expected_action, expected_video = full._infer({}, frame_st_id=frame)
+        expected_rng = torch.get_rng_state()
+        torch.manual_seed(100 + frame)
+        actual_action, actual_video = observed._infer({}, frame_st_id=frame)
+        assert torch.equal(actual_action, expected_action)
+        assert torch.equal(actual_video, expected_video)
+        assert torch.equal(torch.get_rng_state(), expected_rng)
+        stats = observed.action_cache.stats()
+        assert stats["reused_calls"] == 0
+        if frame == 4:
+            assert stats["hypothetical_reused_calls"] == action_steps - 1
+            assert len(stats["diagnostics"]["steps"]) == action_steps - 1

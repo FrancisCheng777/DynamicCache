@@ -33,7 +33,7 @@ class BenchmarkClient:
         self.timeout = timeout
         self.connection = websockets.sync.client.connect(
             f"ws://{host}:{port}", compression=None, max_size=None,
-            open_timeout=15, ping_interval=None,
+            open_timeout=15, ping_interval=None, proxy=None,
         )
         self._unpack(self.connection.recv(timeout=15))  # Upstream greeting.
 
@@ -57,7 +57,8 @@ def extract_obs(obs):
     }
 
 
-def rollout(model, env, initial_state, prompt, seed, *, max_env_steps=800, save_video_path=None):
+def rollout(model, env, initial_state, prompt, seed, *, max_env_steps=800, save_video_path=None,
+            record_actions=False):
     import numpy as np
 
     start = time.perf_counter()
@@ -89,6 +90,10 @@ def rollout(model, env, initial_state, prompt, seed, *, max_env_steps=800, save_
         chunk = {"chunk_index": len(chunks), "infer_rpc_ms": rpc_ms,
                  "policy_cycle_ms": rpc_ms, "c3ache": reply["c3ache"],
                  "timings_ms": reply.get("timings_ms", {})}
+        canonical_action = np.ascontiguousarray(action, dtype=np.float32)
+        chunk["action_sha256"] = hashlib.sha256(canonical_action.tobytes()).hexdigest()
+        if record_actions:
+            chunk["action"] = canonical_action.tolist()
         chunks.append(chunk)
         key_frames = []
         start_idx = 1 if first else 0
@@ -158,6 +163,12 @@ def client_runtime(libero):
             "evaluator_code": git_state(Path(__file__).resolve().parents[2])}
 
 
+def validate_server_mode(metadata, expected_mode):
+    actual_mode = metadata.get("execution_mode", "cached" if metadata["c3ache"]["enabled"] else "baseline")
+    if actual_mode != expected_mode:
+        raise ValueError(f"Connected server mode {actual_mode!r} does not match --expected-mode {expected_mode!r}")
+
+
 def evaluate(args):
     import numpy as np
     import libero
@@ -177,6 +188,7 @@ def evaluate(args):
         "episodes_per_task": args.episodes, "base_seed": args.base_seed,
         "max_env_steps": args.max_env_steps, "limit_check": "chunk_boundary", "settling_steps": 5,
         "resolution": [128, 128], "first_chunk_skip_frames": 1, "save_videos": args.save_videos,
+        "record_actions": args.record_actions or args.expected_mode == "shadow",
         "tasks": {str(task): {"prompt": bench.get_task(task).language,
                               "initial_states_sha256": state_digest(initial_states[task]),
                               "bddl_sha256": hashlib.sha256(Path(bench.get_task_bddl_file_path(task)).read_bytes()).hexdigest()}
@@ -202,8 +214,7 @@ def evaluate(args):
     model = BenchmarkClient(args.host, args.port, args.rpc_timeout)
     try:
         metadata = model.infer({"get_metadata": True})["metadata"]
-        if metadata["c3ache"]["enabled"] != (args.expected_mode == "cached"):
-            raise ValueError("Connected server does not match --expected-mode")
+        validate_server_mode(metadata, args.expected_mode)
         manifest = {"schema_version": 1, "protocol": protocol, "server": metadata,
                     "client_runtime": client_runtime(libero), "complete": False}
         manifest_path = root / "manifest.json"
@@ -238,7 +249,8 @@ def evaluate(args):
                                          camera_heights=128, camera_widths=128)
                 video_path = str(root / "videos" / f"{task:03d}_{episode:05d}.mp4") if args.save_videos else None
                 record.update(rollout(model, env, initial_states[task][episode], bench.get_task(task).language,
-                                      seed, max_env_steps=args.max_env_steps, save_video_path=video_path))
+                                      seed, max_env_steps=args.max_env_steps, save_video_path=video_path,
+                                      record_actions=protocol["record_actions"]))
                 write_json(path, record)
             except Exception as error:
                 record.update(status="error", error=f"{type(error).__name__}: {error}")
@@ -266,9 +278,10 @@ def main():
     parser.add_argument("--base-seed", type=int, default=0)
     parser.add_argument("--max-env-steps", type=int, default=800)
     parser.add_argument("--out-dir", required=True)
-    parser.add_argument("--expected-mode", required=True, choices=["baseline", "cached"])
+    parser.add_argument("--expected-mode", required=True, choices=["baseline", "cached", "shadow"])
     parser.add_argument("--rpc-timeout", type=float, default=1800)
     parser.add_argument("--save-videos", action="store_true")
+    parser.add_argument("--record-actions", action="store_true", help="Save each predicted action chunk for trace comparison; always on in shadow mode")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--check-env", action="store_true", help="Validate simulator assets/rendering without contacting a model server")
     args = parser.parse_args()

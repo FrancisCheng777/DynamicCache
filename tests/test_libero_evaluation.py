@@ -83,6 +83,15 @@ def test_comparison_rejects_changed_checkpoint_or_native_settings(tmp_path):
             compare_runs(tmp_path / "a", tmp_path / "b")
 
 
+def test_shadow_measurements_cannot_be_used_as_cached_speedup_results(tmp_path):
+    make_run(tmp_path / "a", False)
+    manifest = make_run(tmp_path / "b", True)
+    manifest["server"]["execution_mode"] = "shadow"
+    write_json(tmp_path / "b" / "manifest.json", manifest)
+    with pytest.raises(ValueError, match="[Dd]iagnostic|[Ss]hadow"):
+        compare_runs(tmp_path / "a", tmp_path / "b")
+
+
 class Environment:
     """LIBERO is an external boundary; use a deterministic environment contract."""
     def __init__(self, success_at=None):

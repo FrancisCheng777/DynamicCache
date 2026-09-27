@@ -19,8 +19,9 @@
 兼容的客户端环境，不要为了跑通而替换初始状态或忽略加载失败。
 自动配对脚本在加载大模型前会先检查初始状态、任务文件和真实仿真渲染。
 
-目前未在真实 NVIDIA GPU 上验证本移植。不要从 CPU 测试推断 4090 是否能装下
-完整模型。上游当前 `enable_offload=False`；需要时在同一对照里统一使用
+新增旁路误差检测的使用方法见 [DIAGNOSTICS.md](DIAGNOSTICS.md)。固定窗口仍未通过质量验收，
+且新增诊断模式尚待完整 checkpoint 的实卡验证。不要从 CPU 测试推断显存占用。
+上游当前 `enable_offload=False`；需要时在同一对照里统一使用
 `--offload`。增加独立 GPU 可以并行不同 episode/任务，但这版配对 launcher
 有意按一张 GPU、每次一个 rollout 执行；它不自动进行多卡模型切分。
 

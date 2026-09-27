@@ -22,6 +22,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from configs import VA_CONFIGS
 from c3ache_runtime import build_metadata
 from modules.c3ache import C3ache, C3acheConfig
+from modules.c3ache_diagnostics import C3acheDiagnostics
 from distributed.fsdp import shard_model
 from distributed.util import _configure_model, init_distributed
 from modules.utils import (
@@ -52,6 +53,15 @@ class VA_Server:
         self.device = torch.device(f"cuda:{job_config.local_rank}")
         self.enable_offload = getattr(job_config, 'enable_offload', True)  # offload vae & text_encoder to save vram
         self.action_cache = C3ache(getattr(job_config, 'c3ache', C3acheConfig()))
+        if getattr(job_config, 'diagnose_c3ache', False):
+            if job_config.action_norm_method != 'quantiles':
+                raise ValueError('Action-scale diagnostics currently require quantile normalization')
+            channels = job_config.used_action_channel_ids
+            scales = [(job_config.norm_stat['q99'][channel] - job_config.norm_stat['q01'][channel] + 1e-6) / 2
+                      for channel in channels]
+            self.action_cache = C3acheDiagnostics(
+                self.action_cache.config, action_channels=channels, action_scales=scales,
+                guidance_scale=job_config.action_guidance_scale)
         self.profile_inference = getattr(job_config, 'profile_inference', False)
         self.last_infer_timings = {}
         self.metadata = build_metadata(job_config, self.action_cache.config, device=self.device)
@@ -735,7 +745,9 @@ def run(args):
         config.save_root = args.save_root
     if args.checkpoint is not None:
         config.wan22_pretrained_model_name_or_path = args.checkpoint
-    config.c3ache = C3acheConfig(args.c3ache, args.cache_start_step, args.cache_end_step, args.cache_refresh_interval)
+    config.diagnose_c3ache = args.diagnose_c3ache
+    config.c3ache = C3acheConfig(args.c3ache or args.diagnose_c3ache,
+                               args.cache_start_step, args.cache_end_step, args.cache_refresh_interval)
     if config.c3ache.enabled and config.c3ache.end_step >= config.action_num_inference_steps:
         raise ValueError('Cache end step must be smaller than the native action step count')
     config.profile_inference = args.profile_inference
@@ -784,7 +796,10 @@ def main():
         help='save root'
     )
     parser.add_argument('--checkpoint', help='Local released checkpoint directory; overrides the config path')
-    parser.add_argument('--c3ache', action='store_true', help='Enable training-free action residual reuse')
+    cache_mode = parser.add_mutually_exclusive_group()
+    cache_mode.add_argument('--c3ache', action='store_true', help='Enable training-free action residual reuse')
+    cache_mode.add_argument('--diagnose-c3ache', action='store_true',
+                            help='Execute the full policy and measure hypothetical cache errors; not a speed benchmark')
     parser.add_argument('--cache-start-step', type=int, default=5, help='First cached sampler step, zero-based (inclusive)')
     parser.add_argument('--cache-end-step', type=int, default=39, help='Last cached sampler step, zero-based (inclusive)')
     parser.add_argument('--cache-refresh-interval', type=int, default=2, help='Regular chunks per refresh; 0=no periodic refresh, 1=all full')

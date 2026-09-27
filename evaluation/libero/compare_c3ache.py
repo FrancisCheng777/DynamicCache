@@ -69,6 +69,11 @@ def latency(records):
 def compare_runs(baseline_dir, cached_dir, margin_pp=1.0):
     left, a = load_run(baseline_dir)
     right, b = load_run(cached_dir)
+    if any(manifest["server"].get("execution_mode") == "shadow" for manifest in [left, right]):
+        raise ValueError("Shadow diagnostics execute the full policy and cannot be used as a cache speed benchmark")
+    if any(chunk.get("c3ache", {}).get("execution_mode") == "shadow"
+           for records in [a, b] for record in records.values() for chunk in record["chunks"]):
+        raise ValueError("Diagnostic chunks cannot be included in cache speed benchmarks")
     for key in ["schema_version", "protocol", "client_runtime"]:
         if left[key] != right[key]:
             raise ValueError(f"Run mismatch in {key}; paired comparison would be confounded")

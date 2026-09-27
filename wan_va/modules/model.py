@@ -887,19 +887,20 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
                                  'b l n c -> b n l c').chunk(2, dim=1)
         shift = shift.to(latent_hidden_states.device).squeeze(1)
         scale = scale.to(latent_hidden_states.device).squeeze(1)
-        latent_hidden_states = (self.norm_out(latent_hidden_states.float()) *
-                                (1. + scale) +
-                                shift).type_as(latent_hidden_states)
+        def output_head(hidden_states):
+            hidden_states = (self.norm_out(hidden_states.float()) *
+                             (1. + scale) + shift).type_as(hidden_states)
+            if action_mode:
+                return self.action_proj_out(hidden_states)
+            hidden_states = self.proj_out(hidden_states)
+            return rearrange(hidden_states, 'b l (n c) -> b (l n) c',
+                             n=math.prod(self.patch_size))
 
-        if action_mode:
-            latent_hidden_states = self.action_proj_out(latent_hidden_states)
-        else:
-            latent_hidden_states = self.proj_out(latent_hidden_states)
-            latent_hidden_states = rearrange(latent_hidden_states,
-                                             'b l (n c) -> b (l n) c',
-                                             n=math.prod(self.patch_size))  #
-
-        return latent_hidden_states
+        prediction = output_head(latent_hidden_states)
+        observer = getattr(action_cache, 'observe_output', None)
+        if observer is not None and action_mode and not self.training and not torch.is_grad_enabled():
+            observer(prediction, output_head)
+        return prediction
 
 
 if __name__ == '__main__':

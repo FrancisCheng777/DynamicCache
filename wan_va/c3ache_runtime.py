@@ -54,6 +54,8 @@ def build_metadata(config, cache_config, *, device):
     for name in ["torch", "diffusers", "transformers"]:
         packages[name] = importlib.metadata.version(name)
     props = torch.cuda.get_device_properties(device)
+    execution_mode = ("shadow" if getattr(config, "diagnose_c3ache", False)
+                      else "cached" if cache_config.enabled else "baseline")
     return {
         "schema_version": 1,
         "upstream_commit": UPSTREAM_COMMIT,
@@ -64,6 +66,8 @@ def build_metadata(config, cache_config, *, device):
                    "enable_offload": getattr(config, "enable_offload", True),
                    "save_debug": getattr(config, "save_debug", True)},
         "c3ache": asdict(cache_config),
+        "execution_mode": execution_mode,
+        "timing_is_benchmark": execution_mode != "shadow",
         "profile_inference": getattr(config, "profile_inference", False),
         "runtime": {"python": platform.python_version(), "packages": packages,
                     "cuda": torch.version.cuda, "cudnn": torch.backends.cudnn.version(),
